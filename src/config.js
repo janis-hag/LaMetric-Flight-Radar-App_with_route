@@ -21,6 +21,9 @@ module.exports = {
     notificationCooldownMinutes: parseInt(process.env.COOLDOWN_MINUTES) || 5,
     // Fetch aircraft type/model (uses extra API credits per aircraft)
     fetchMetadata: process.env.FETCH_AIRCRAFT_METADATA === 'true',
+
+    // Notification sound switch
+    soundEnabled: process.env.NOTIFICATION_SOUND !== 'false',
   },
 
   // OpenSky API Configuration
