@@ -105,27 +105,28 @@ class LaMetricClient {
      : 'Ground';
 
    const aircraftModel =
-     flight.aircraftModel || flight.typecode || 'Unknown aircraft';
+     flight.aircraftModel || flight.typecode || null;
 
-   const parts = [
-     callsign
-   ];
+   const parts = [callsign];
 
-   // Only display the route if both airports are available
    if (flight.origin && flight.destination) {
-     parts.push(`${flight.origin} → ${flight.destination}`);
+    parts.push(`${flight.origin} → ${flight.destination}`);
    }
 
-   parts.push(aircraftModel);
-   parts.push(altitudeText);
+   if (aircraftModel) {
+    parts.push(aircraftModel);
+   }
 
-   /** 
-   *if (flight.distance) {
-   *  parts.push(`${flight.distance.toFixed(1)} mi`);
-   *}
-   */
-    
+   if (altitudeText) {
+    parts.push(altitudeText);
+   }
+
+   if (flight.distance) {
+    parts.push(`${flight.distance.toFixed(1)} mi`);
+   }
+
    const scrollingText = parts.join(' | ');
+    
 
    const payload = {
      priority: 'info',
