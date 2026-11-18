@@ -379,48 +379,80 @@ class OpenSkyClient {
     return null;
   }
 }
-  async resolveAircraftType(aircraft) {
+
+async resolveAircraftType(aircraft) {
+  const emptyResult = {
+    typecode: null,
+    model: null,
+    manufacturer: null,
+    registration: null
+  };
+
+  if (!aircraft?.icao24) {
+    return emptyResult;
+  }
+
+  const hex = aircraft.icao24.toLowerCase();
+
   let metadata = null;
 
-  // 1. OpenSky metadata
-  if (config.tracking.fetchMetadata) {
-    metadata = await this.getAircraftMetadata(aircraft.icao24);
-  }
-
-  let typecode = metadata?.typecode || null;
-  let model = metadata?.model || null;
-  let manufacturer = metadata?.manufacturerName || null;
-
-  // 2. HexDB fallback
-  if (!typecode && !model) {
-    const hexdb = await this.getAircraftFromHexDB(aircraft.icao24);
-
-    if (hexdb) {
-      typecode = hexdb.typecode || typecode;
-      model = hexdb.model || model;
-      manufacturer = hexdb.manufacturer || manufacturer;
+  // 1. OpenSky
+  try {
+    if (config.tracking.fetchMetadata) {
+      metadata = await this.getAircraftMetadata(hex);
     }
+  } catch (error) {
+    console.warn(`OpenSky metadata failed for ${hex}: ${error.message}`);
   }
 
-  // 3. AirLabs fallback
-  if (!typecode && !model && config.airlabs.apiKey) {
-    const airlabs = await this.getAircraftFromAirLabs(aircraft.icao24);
-
-    if (airlabs) {
-      typecode = airlabs.typecode || typecode;
-      model = airlabs.model || model;
-      manufacturer = airlabs.manufacturer || manufacturer;
-    }
-  }
-
-  // Return null values rather than fake aircraft descriptions
-  return {
-    typecode,
-    model,
-    manufacturer,
+  let result = {
+    typecode: metadata?.typecode || null,
+    model: metadata?.model || null,
+    manufacturer: metadata?.manufacturerName || null,
     registration: metadata?.registration || null
   };
+
+  // 2. HexDB
+  if (!result.typecode && !result.model) {
+    try {
+      const hexdb = await this.getAircraftFromHexDB(hex);
+
+      if (hexdb) {
+        result.typecode = hexdb.typecode || result.typecode;
+        result.model = hexdb.model || result.model;
+        result.manufacturer = hexdb.manufacturer || result.manufacturer;
+        result.registration = hexdb.registration || result.registration;
+      }
+    } catch (error) {
+      console.warn(`HexDB failed for ${hex}: ${error.message}`);
+    }
   }
+
+  // 3. AirLabs
+  if (!result.typecode && !result.model) {
+    try {
+      const airlabs = await this.getAircraftFromAirLabs(hex);
+
+      if (airlabs) {
+        result.typecode = airlabs.typecode || result.typecode;
+        result.model = airlabs.model || result.model;
+        result.manufacturer = airlabs.manufacturer || result.manufacturer;
+        result.registration = airlabs.registration || result.registration;
+      }
+    } catch (error) {
+      console.warn(`AirLabs failed for ${hex}: ${error.message}`);
+    }
+  }
+
+  // Always return a valid object
+  return {
+    typecode: result.typecode || null,
+    model: result.model || null,
+    manufacturer: result.manufacturer || null,
+    registration: result.registration || null
+  };
+}
+  
 }
 
 module.exports = OpenSkyClient;
