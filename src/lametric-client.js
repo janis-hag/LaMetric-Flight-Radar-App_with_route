@@ -121,9 +121,6 @@ class LaMetricClient {
     parts.push(altitudeText);
    }
 
-   if (flight.distance) {
-    parts.push(`${flight.distance.toFixed(1)} mi`);
-   }
 
    const scrollingText = parts.join(' | ');
     
