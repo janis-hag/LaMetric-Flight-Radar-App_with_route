@@ -34,4 +34,7 @@ module.exports = {
     clientId: process.env.OPENSKY_CLIENT_ID || null,
     clientSecret: process.env.OPENSKY_CLIENT_SECRET || null,
   },
+  airlabs: {
+  apiKey: process.env.AIRLABS_API_KEY || null
+  },
 };
