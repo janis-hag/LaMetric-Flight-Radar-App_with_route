@@ -12,6 +12,8 @@ const config = require('./config');
 // Cache for aircraft metadata (type, registration, etc.)
 const metadataCache = new Map();
 
+const hexdbCache = new Map();
+
 // Rate limit state
 let rateLimitedUntil = 0;
 
@@ -295,6 +297,52 @@ class OpenSkyClient {
   static msToKnots(ms) {
     return ms ? Math.round(ms * 1.94384) : null;
   }
+  async getAircraftFromHexDB(icao24) {
+  if (!icao24) return null;
+
+  const hex = icao24.toLowerCase();
+
+  if (hexdbCache.has(hex)) {
+    return hexdbCache.get(hex);
+  }
+
+  try {
+    const url = `https://hexdb.io/api/v2/aircraft/${encodeURIComponent(hex)}`;
+
+    const response = await fetch(url, {
+      signal: AbortSignal.timeout(5000)
+    });
+
+    if (!response.ok) {
+      hexdbCache.set(hex, null);
+      return null;
+    }
+
+    const data = await response.json();
+
+    const result = {
+      registration: data.registration || null,
+      manufacturer: data.manufacturer || null,
+      model: data.type || null,
+      typecode: data.icao_type_code || null,
+      owner: data.registered_owner || null
+    };
+
+    // Cache only useful results
+    if (result.model || result.typecode || result.manufacturer) {
+      hexdbCache.set(hex, result);
+      console.log(`   🔎 HexDB identified ${hex}: ${result.model || result.typecode}`);
+      return result;
+    }
+
+    hexdbCache.set(hex, null);
+    return null;
+
+  } catch (error) {
+    console.log(`   ⚠️ HexDB lookup failed for ${hex}: ${error.message}`);
+    return null;
+  }
+}
 }
 
 module.exports = OpenSkyClient;
