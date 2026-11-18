@@ -127,45 +127,49 @@ class FlightMonitor {
           enriched = await this.opensky.enrichWithMetadata(plane);
         }
 
-        const callsign = enriched.callsign || enriched.icao24;
-
-        const altitude = enriched.baroAltitude ?? enriched.geoAltitude ?? 0;
         
-        const typecode = enriched.typecode || null;
+const callsign = plane.callsign || plane.icao24;
 
-        // Full aircraft model (if available)
-        const aircraftModel =
-          enriched.model ||
-          (enriched.manufacturerName && typecode
-            ? `${enriched.manufacturerName} ${typecode}`
-            : typecode);
+const altitude =
+  plane.baroAltitude ??
+  plane.geoAltitude ??
+  0;
 
-        const distance = plane.distanceMiles;
+const distance = plane.distanceMiles;
 
-        // Fetch origin and destination using callsign
-        const route = await getFlightRoute(callsign);
+// Resolve aircraft model using multiple databases
+const aircraftInfo = await this.opensky.resolveAircraftType(plane);
 
-        const origin = route?.origin || null;
-        const destination = route?.destination || null;
+const typecode = aircraftInfo.typecode || null;
 
-        // Log what we found
-        console.log(
-          `   - ${callsign}: ${origin || '?'} → ${destination || '?'} | ` +
-          `${aircraftModel || 'Unknown aircraft'} | ` +
-          `${altitude ? altitude.toLocaleString() + ' ft' : 'Unknown altitude'}`
-        );
+const aircraftModel =
+  aircraftInfo.model ||
+  (aircraftInfo.manufacturer && typecode
+    ? `${aircraftInfo.manufacturer} ${typecode}`
+    : typecode) ||
+  null;
 
-        // Send notification to LaMetric
-        this.lametric.pushFlightNotification({
-          callsign,
-          altitude,
-          typecode,
-          aircraftModel,
-          origin,
-          destination,
-          distance,
-        });
+// Log the aircraft without printing unknown aircraft placeholders
+const logParts = [callsign];
 
+if (aircraftModel) {
+  logParts.push(aircraftModel);
+}
+
+logParts.push(`${Math.round(altitude).toLocaleString()} m`);
+logParts.push(`${distance.toFixed(1)} mi`);
+
+console.log(`   - ${logParts.join(' | ')}`);
+
+// Send notification
+this.lametric.pushFlightNotification({
+  callsign,
+  altitude,
+  typecode,
+  aircraftModel
+});
+
+        
         this.markNotified(plane.icao24);
 
         // Small delay between notifications to not overwhelm
