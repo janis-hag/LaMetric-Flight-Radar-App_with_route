@@ -343,6 +343,42 @@ class OpenSkyClient {
     return null;
   }
 }
+  async getAircraftFromAirLabs(icao24) {
+  if (!icao24 || !config.airlabs.apiKey) return null;
+
+  try {
+    const url = new URL('https://airlabs.co/api/v9/fleets');
+
+    url.searchParams.set('hex', icao24.toLowerCase());
+    url.searchParams.set('api_key', config.airlabs.apiKey);
+
+    const response = await fetch(url, {
+      signal: AbortSignal.timeout(5000)
+    });
+
+    if (!response.ok) {
+      console.log(`   ⚠️ AirLabs returned HTTP ${response.status}`);
+      return null;
+    }
+
+    const data = await response.json();
+    const aircraft = data.response?.[0] || data[0] || null;
+
+    if (!aircraft) return null;
+
+    return {
+      registration: aircraft.reg_number || null,
+      manufacturer: aircraft.manufacturer || null,
+      model: aircraft.model || null,
+      typecode: aircraft.icao || aircraft.aircraft_icao || null,
+      owner: null
+    };
+
+  } catch (error) {
+    console.log(`   ⚠️ AirLabs lookup failed: ${error.message}`);
+    return null;
+  }
+}
 }
 
 module.exports = OpenSkyClient;
