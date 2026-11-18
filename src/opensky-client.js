@@ -379,6 +379,50 @@ class OpenSkyClient {
     return null;
   }
 }
+  async resolveAircraftType(aircraft) {
+  let metadata = null;
+
+  // 1. OpenSky metadata
+  if (config.tracking.fetchMetadata) {
+    metadata = await this.getAircraftMetadata(aircraft.icao24);
+  }
+
+  let typecode = metadata?.typecode || null;
+  let model = metadata?.model || null;
+  let manufacturer = metadata?.manufacturerName || null;
+
+  // 2. HexDB fallback
+  if (!typecode && !model) {
+    const hexdb = await this.getAircraftFromHexDB(aircraft.icao24);
+
+    if (hexdb) {
+      typecode = hexdb.typecode || typecode;
+      model = hexdb.model || model;
+      manufacturer = hexdb.manufacturer || manufacturer;
+    }
+  }
+
+  /* Not used yet as we have no API key  
+  // 3. AirLabs fallback
+  if (!typecode && !model && config.airlabs.apiKey) {
+    const airlabs = await this.getAircraftFromAirLabs(aircraft.icao24);
+
+    if (airlabs) {
+      typecode = airlabs.typecode || typecode;
+      model = airlabs.model || model;
+      manufacturer = airlabs.manufacturer || manufacturer;
+    }
+  }
+
+  // Return null values rather than fake aircraft descriptions
+  return {
+    typecode,
+    model,
+    manufacturer,
+    registration: metadata?.registration || null
+  };
+  */
+}
 }
 
 module.exports = OpenSkyClient;
