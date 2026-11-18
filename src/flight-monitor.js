@@ -129,10 +129,8 @@ class FlightMonitor {
 
         const callsign = enriched.callsign || enriched.icao24;
 
-        const altitude = OpenSkyClient.metersToFeet(
-          enriched.baroAltitude || enriched.geoAltitude
-        );
-
+        const altitude = enriched.baroAltitude ?? enriched.geoAltitude ?? 0;
+        
         const typecode = enriched.typecode || null;
 
         // Full aircraft model (if available)
