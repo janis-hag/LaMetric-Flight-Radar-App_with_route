@@ -1,25 +1,76 @@
-/**
- * OpenSky Network API Client
- *
- * Fetches real-time flight data for aircraft within a bounding box.
- * Supports OAuth2 client credentials flow for new accounts (post March 2025).
- * API docs: https://openskynetwork.github.io/opensky-api/
- */
+// OpenSky Network API Client
+//
+// Fetches real-time aircraft data and aircraft metadata.
+// Metadata fallback order:
+//   1. OpenSky
+//   2. HexDB
+//   3. AirLabs
+//
+// Compatible with Node.js 20+ (native fetch).
+// API docs: https://opensky-network.github.io/opensky-api/
 
-const { execSync } = require('child_process');
 const config = require('./config');
 
-// Cache for aircraft metadata (type, registration, etc.)
+// -----------------------------------------------------------------------------
+// Caches
+// -----------------------------------------------------------------------------
+
 const metadataCache = new Map();
-
 const hexdbCache = new Map();
+const airlabsCache = new Map();
 
-// Rate limit state
+// Cache durations
+const METADATA_CACHE_TTL = 30 * 24 * 60 * 60 * 1000; // 30 days
+const NEGATIVE_CACHE_TTL = 30 * 60 * 1000;             // 30 minutes
+const FALLBACK_CACHE_TTL = 7 * 24 * 60 * 60 * 1000;  // 7 days
+
+// Rate-limit state
 let rateLimitedUntil = 0;
 
 // OAuth2 token cache
 let accessToken = null;
 let tokenExpiresAt = 0;
+
+// -----------------------------------------------------------------------------
+// Cache helpers
+// -----------------------------------------------------------------------------
+
+function getCached(cache, key) {
+  const entry = cache.get(key);
+
+  if (!entry) {
+    return undefined;
+  }
+
+  if (Date.now() >= entry.expiresAt) {
+    cache.delete(key);
+    return undefined;
+  }
+
+  return entry.value;
+}
+
+function setCached(cache, key, value, ttl) {
+  cache.set(key, {
+    value,
+    expiresAt: Date.now() + ttl,
+  });
+}
+
+function normalizeHex(icao24) {
+  return String(icao24 || '').trim().toLowerCase();
+}
+
+function normalizeCallsign(callsign) {
+  return String(callsign || '')
+    .trim()
+    .toUpperCase()
+    .replace(/\s+/g, '');
+}
+
+// -----------------------------------------------------------------------------
+// OpenSky Client
+// -----------------------------------------------------------------------------
 
 class OpenSkyClient {
   constructor() {
@@ -27,155 +78,193 @@ class OpenSkyClient {
     this.tokenUrl = config.opensky.tokenUrl;
     this.clientId = config.opensky.clientId;
     this.clientSecret = config.opensky.clientSecret;
-    this.hasAuth = !!(this.clientId && this.clientSecret);
+
+    this.hasAuth = Boolean(this.clientId && this.clientSecret);
 
     if (this.hasAuth) {
-      console.log(`🔐 OpenSky: OAuth2 client configured (${this.clientId})`);
+      console.log(`🔐 OpenSky: OAuth2 configured (${this.clientId})`);
     } else {
-      console.log('🔓 OpenSky: Anonymous mode (limited to 400 credits/day)');
-      console.log('   Tip: Register at opensky-network.org for 10x more credits');
+      console.log('🔓 OpenSky: Anonymous mode');
     }
   }
 
-  /**
-   * Get curl command (Windows + Unix compatible)
-   */
-  getCurlCmd() {
-    return process.platform === 'win32' ? 'curl.exe' : 'curl';
-  }
+  // ---------------------------------------------------------------------------
+  // OAuth2
+  // ---------------------------------------------------------------------------
 
-  /**
-   * Get OAuth2 access token
-   */
-  async getAccessToken() {
-    // Return cached token if still valid (with 60s buffer)
-    if (accessToken && Date.now() < tokenExpiresAt - 60000) {
+  async getAccessToken(forceRefresh = false) {
+    if (
+      !forceRefresh &&
+      accessToken &&
+      Date.now() < tokenExpiresAt - 60000
+    ) {
       return accessToken;
     }
 
-    console.log('🔑 Fetching OAuth2 access token...');
-
-    const curlCmd = this.getCurlCmd();
-
-    // OpenSky uses form-encoded client credentials (not Basic auth)
-    const cmd = `${curlCmd} -s -X POST "${this.tokenUrl}" -H "Content-Type: application/x-www-form-urlencoded" -d "grant_type=client_credentials" -d "client_id=${this.clientId}" -d "client_secret=${this.clientSecret}"`;
+    if (!this.hasAuth) {
+      return null;
+    }
 
     try {
-      const result = execSync(cmd, {
-        timeout: 15000,
-        encoding: 'utf8',
-        shell: true
+      console.log('🔑 Fetching OpenSky OAuth2 token...');
+
+      const body = new URLSearchParams({
+        grant_type: 'client_credentials',
+        client_id: this.clientId,
+        client_secret: this.clientSecret,
       });
 
-      const data = JSON.parse(result);
+      const response = await fetch(this.tokenUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+        body,
+        signal: AbortSignal.timeout(15000),
+      });
 
-      if (data.access_token) {
-        accessToken = data.access_token;
-        // Token usually expires in 3600 seconds (1 hour)
-        const expiresIn = data.expires_in || 3600;
-        tokenExpiresAt = Date.now() + (expiresIn * 1000);
-        console.log(`✅ Got access token (expires in ${expiresIn}s)`);
-        return accessToken;
-      } else {
-        console.error('❌ No access token in response:', result.substring(0, 200));
+      if (!response.ok) {
+        console.error(`❌ OpenSky token request: HTTP ${response.status}`);
+        accessToken = null;
+        tokenExpiresAt = 0;
         return null;
       }
+
+      const data = await response.json();
+
+      if (!data?.access_token) {
+        console.error('❌ OpenSky token response contained no access token');
+        return null;
+      }
+
+      accessToken = data.access_token;
+
+      const expiresIn = Number(data.expires_in) || 3600;
+      tokenExpiresAt = Date.now() + expiresIn * 1000;
+
+      console.log(`✅ OpenSky token received (expires in ${expiresIn}s)`);
+
+      return accessToken;
     } catch (error) {
-      console.error('❌ Failed to get access token:', error.message);
+      console.error(`❌ OpenSky token request failed: ${error.message}`);
+      accessToken = null;
+      tokenExpiresAt = 0;
       return null;
     }
   }
 
-  /**
-   * Check if we're currently rate limited
-   */
+  // ---------------------------------------------------------------------------
+  // Rate limiting
+  // ---------------------------------------------------------------------------
+
   isRateLimited() {
     if (Date.now() < rateLimitedUntil) {
-      const waitSecs = Math.ceil((rateLimitedUntil - Date.now()) / 1000);
-      console.log(`⏳ Rate limited, waiting ${waitSecs}s...`);
+      const seconds = Math.ceil(
+        (rateLimitedUntil - Date.now()) / 1000
+      );
+
+      console.log(`⏳ OpenSky rate limited; retry in ${seconds}s`);
       return true;
     }
+
     return false;
   }
 
-  /**
-   * Set rate limit backoff
-   */
   setRateLimited(seconds = 60) {
-    rateLimitedUntil = Date.now() + (seconds * 1000);
-    console.log(`⚠️  Rate limited! Backing off for ${seconds} seconds.`);
+    rateLimitedUntil = Date.now() + seconds * 1000;
+    console.warn(`⚠️ OpenSky rate limit; backing off ${seconds}s`);
   }
 
-  /**
-   * Execute a curl request (Windows + Unix compatible)
-   */
-  async curlGet(url) {
-    // Check rate limit first
-    if (this.isRateLimited()) {
-      return null;
-    }
+  // ---------------------------------------------------------------------------
+  // HTTP helper
+  // ---------------------------------------------------------------------------
 
-    const curlCmd = this.getCurlCmd();
-
-    // Build command with optional OAuth2 authentication
-    let cmd = `${curlCmd} -s -w "\\nHTTP_STATUS:%{http_code}"`;
-
-    if (this.hasAuth) {
-      const token = await this.getAccessToken();
-      if (token) {
-        cmd += ` -H "Authorization: Bearer ${token}"`;
-      }
-    }
-
-    cmd += ` "${url}"`;
-
+  async requestJson(url, options = {}) {
     try {
-      const result = execSync(cmd, {
-        timeout: 15000,
-        encoding: 'utf8',
-        shell: true
+      const response = await fetch(url, {
+        ...options,
+        signal: options.signal || AbortSignal.timeout(15000),
       });
 
-      // Parse response and HTTP status
-      const lines = result.trim().split('\n');
-      const statusLine = lines.pop();
-      const body = lines.join('\n');
-      const httpStatus = statusLine.replace('HTTP_STATUS:', '');
-
-      // Handle rate limiting
-      if (httpStatus === '429') {
+      if (response.status === 429) {
         this.setRateLimited(60);
         return null;
       }
 
-      // Handle auth errors (token might have expired)
-      if (httpStatus === '401') {
-        console.log('🔄 Token expired, refreshing...');
-        accessToken = null;
-        tokenExpiresAt = 0;
-        // Retry once with fresh token
+      if (!response.ok) {
+        console.warn(`⚠️ HTTP ${response.status} for ${url}`);
         return null;
       }
 
-      // Handle other errors
-      if (httpStatus !== '200') {
-        console.error(`❌ OpenSky API error: HTTP ${httpStatus}`);
-        return null;
-      }
-
-      return JSON.parse(body);
+      return await response.json();
     } catch (error) {
-      console.error('❌ OpenSky request failed:', error.message);
+      console.warn(`⚠️ Request failed: ${error.message}`);
       return null;
     }
   }
 
-  /**
-   * Calculate bounding box around a point
-   */
+  // OpenSky API request with optional OAuth authentication.
+  async curlGet(url, retryAuth = true) {
+    if (this.isRateLimited()) {
+      return null;
+    }
+
+    let headers = {};
+
+    if (this.hasAuth) {
+      const token = await this.getAccessToken();
+
+      if (!token) {
+        console.warn('⚠️ OpenSky authentication unavailable');
+        return null;
+      }
+
+      headers.Authorization = `Bearer ${token}`;
+    }
+
+    try {
+      const response = await fetch(url, {
+        headers,
+        signal: AbortSignal.timeout(15000),
+      });
+
+      if (response.status === 429) {
+        this.setRateLimited(60);
+        return null;
+      }
+
+      // Refresh token and retry once on unauthorized.
+      if (response.status === 401 && this.hasAuth && retryAuth) {
+        console.warn('🔄 OpenSky token rejected; refreshing');
+
+        await this.getAccessToken(true);
+
+        return this.curlGet(url, false);
+      }
+
+      if (!response.ok) {
+        console.error(`❌ OpenSky API error: HTTP ${response.status}`);
+        return null;
+      }
+
+      return await response.json();
+    } catch (error) {
+      console.error(`❌ OpenSky request failed: ${error.message}`);
+      return null;
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Geographic helpers
+  // ---------------------------------------------------------------------------
+
   calculateBoundingBox(lat, lon, radiusMiles) {
     const latDelta = radiusMiles / 69;
-    const lonDelta = radiusMiles / (69 * Math.cos(lat * Math.PI / 180));
+    const cosLat = Math.cos((lat * Math.PI) / 180);
+
+    // Avoid division by zero near the poles.
+    const lonDelta =
+      radiusMiles / Math.max(69 * Math.abs(cosLat), 0.01);
 
     return {
       lamin: lat - latDelta,
@@ -185,274 +274,355 @@ class OpenSkyClient {
     };
   }
 
-  /**
-   * Get aircraft metadata (type, registration) from ICAO24
-   * Note: Each call uses API credits!
-   */
+  // ---------------------------------------------------------------------------
+  // Aircraft metadata - OpenSky
+  // ---------------------------------------------------------------------------
+
   async getAircraftMetadata(icao24) {
-    // Check cache first
-    if (metadataCache.has(icao24)) {
-      return metadataCache.get(icao24);
+    const hex = normalizeHex(icao24);
+
+    if (!hex) {
+      return null;
+    }
+
+    const cached = getCached(metadataCache, hex);
+
+    if (cached !== undefined) {
+      return cached;
     }
 
     try {
-      // OpenSky metadata endpoint
-      const url = `${this.baseUrl}/metadata/aircraft/icao/${icao24}`;
+      const url = `${this.baseUrl}/metadata/aircraft/icao/${encodeURIComponent(hex)}`;
       const data = await this.curlGet(url);
 
-      if (data) {
-        const metadata = {
-          registration: data.registration || null,
-          manufacturerName: data.manufacturerName || null,
-          model: data.model || null,
-          typecode: data.typecode || null,
-          owner: data.owner || null,
-        };
-        metadataCache.set(icao24, metadata);
-        return metadata;
+      if (!data) {
+        setCached(metadataCache, hex, null, NEGATIVE_CACHE_TTL);
+        return null;
       }
-    } catch (error) {
-      // Silently fail - metadata is optional
-    }
 
-    metadataCache.set(icao24, null);
-    return null;
+      const metadata = {
+        registration: data.registration || null,
+        manufacturerName: data.manufacturerName || null,
+        model: data.model || null,
+        typecode: data.typecode || null,
+        owner: data.owner || null,
+      };
+
+      const hasData = Object.values(metadata).some(Boolean);
+
+      setCached(
+        metadataCache,
+        hex,
+        hasData ? metadata : null,
+        hasData ? METADATA_CACHE_TTL : NEGATIVE_CACHE_TTL
+      );
+
+      return hasData ? metadata : null;
+    } catch (error) {
+      console.warn(`⚠️ OpenSky metadata failed for ${hex}: ${error.message}`);
+      setCached(metadataCache, hex, null, NEGATIVE_CACHE_TTL);
+      return null;
+    }
   }
 
-  /**
-   * Fetch aircraft states within a bounding box
-   */
-  async getStatesInBox(bbox) {
-    const url = `${this.baseUrl}/states/all?lamin=${bbox.lamin}&lamax=${bbox.lamax}&lomin=${bbox.lomin}&lomax=${bbox.lomax}`;
+  // ---------------------------------------------------------------------------
+  // Flight state data
+  // ---------------------------------------------------------------------------
 
+  async getStatesInBox(bbox) {
+    const params = new URLSearchParams({
+      lamin: bbox.lamin,
+      lamax: bbox.lamax,
+      lomin: bbox.lomin,
+      lomax: bbox.lomax,
+    });
+
+    const url = `${this.baseUrl}/states/all?${params.toString()}`;
     const data = await this.curlGet(url);
 
-    if (!data || !data.states || data.states.length === 0) {
+    if (!Array.isArray(data?.states) || data.states.length === 0) {
       return [];
     }
 
-    // Parse state vectors into readable objects
-    return data.states.map(state => ({
-      icao24: state[0],
-      callsign: (state[1] || '').trim(),
-      originCountry: state[2],
-      timePosition: state[3],
-      lastContact: state[4],
-      longitude: state[5],
-      latitude: state[6],
-      baroAltitude: state[7],
-      onGround: state[8],
-      velocity: state[9],
-      trueTrack: state[10],
-      verticalRate: state[11],
-      sensors: state[12],
-      geoAltitude: state[13],
-      squawk: state[14],
-      spi: state[15],
-      positionSource: state[16],
+    return data.states.map((state) => ({
+      icao24: state[0] || null,
+      callsign: normalizeCallsign(state[1]),
+      originCountry: state[2] || null,
+      timePosition: state[3] ?? null,
+      lastContact: state[4] ?? null,
+      longitude: state[5] ?? null,
+      latitude: state[6] ?? null,
+      baroAltitude: state[7] ?? null,
+      onGround: state[8] ?? null,
+      velocity: state[9] ?? null,
+      trueTrack: state[10] ?? null,
+      verticalRate: state[11] ?? null,
+      sensors: state[12] ?? null,
+      geoAltitude: state[13] ?? null,
+      squawk: state[14] || null,
+      spi: state[15] ?? null,
+      positionSource: state[16] ?? null,
     }));
   }
 
-  /**
-   * Fetch aircraft near a location
-   */
   async getAircraftNear(lat, lon, radiusMiles) {
     const bbox = this.calculateBoundingBox(lat, lon, radiusMiles);
-    console.log(`🔍 Searching for aircraft within ${radiusMiles} miles`);
+
+    console.log(`🔍 Searching aircraft within ${radiusMiles} miles`);
 
     const aircraft = await this.getStatesInBox(bbox);
 
-    // Filter out aircraft on the ground
-    const inFlight = aircraft.filter(a => !a.onGround && a.latitude && a.longitude);
+    // null and undefined coordinates are rejected, but zero is valid.
+    const inFlight = aircraft.filter(
+      (a) =>
+        !a.onGround &&
+        Number.isFinite(a.latitude) &&
+        Number.isFinite(a.longitude)
+    );
 
     console.log(`   Found ${inFlight.length} aircraft in flight`);
+
     return inFlight;
   }
 
-  /**
-   * Enrich aircraft with metadata (type, etc.)
-   * Only call this if FETCH_AIRCRAFT_METADATA=true
-   */
+  // ---------------------------------------------------------------------------
+  // Optional OpenSky metadata enrichment
+  // ---------------------------------------------------------------------------
+
   async enrichWithMetadata(aircraft) {
-    const metadata = await this.getAircraftMetadata(aircraft.icao24);
+    const metadata = await this.getAircraftMetadata(aircraft?.icao24);
 
     return {
       ...aircraft,
       typecode: metadata?.typecode || null,
       model: metadata?.model || null,
       registration: metadata?.registration || null,
+      manufacturer: metadata?.manufacturerName || null,
     };
   }
 
-  /**
-   * Convert meters to feet
-   */
-  static metersToFeet(meters) {
-    return meters ? Math.round(meters * 3.28084) : null;
-  }
+  // ---------------------------------------------------------------------------
+  // HexDB fallback
+  // ---------------------------------------------------------------------------
 
-  /**
-   * Convert m/s to knots
-   */
-  static msToKnots(ms) {
-    return ms ? Math.round(ms * 1.94384) : null;
-  }
   async getAircraftFromHexDB(icao24) {
-  if (!icao24) return null;
+    const hex = normalizeHex(icao24);
 
-  const hex = icao24.toLowerCase();
-
-  if (hexdbCache.has(hex)) {
-    return hexdbCache.get(hex);
-  }
-
-  try {
-    const url = `https://hexdb.io/api/v2/aircraft/${encodeURIComponent(hex)}`;
-
-    const response = await fetch(url, {
-      signal: AbortSignal.timeout(5000)
-    });
-
-    if (!response.ok) {
-      hexdbCache.set(hex, null);
+    if (!hex) {
       return null;
     }
 
-    const data = await response.json();
+    const cached = getCached(hexdbCache, hex);
 
-    const result = {
-      registration: data.registration || null,
-      manufacturer: data.manufacturer || null,
-      model: data.type || null,
-      typecode: data.icao_type_code || null,
-      owner: data.registered_owner || null
-    };
-
-    // Cache only useful results
-    if (result.model || result.typecode || result.manufacturer) {
-      hexdbCache.set(hex, result);
-      console.log(`   🔎 HexDB identified ${hex}: ${result.model || result.typecode}`);
-      return result;
+    if (cached !== undefined) {
+      return cached;
     }
 
-    hexdbCache.set(hex, null);
-    return null;
+    try {
+      const url = `https://hexdb.io/api/v2/aircraft/${encodeURIComponent(hex)}`;
 
-  } catch (error) {
-    console.log(`   ⚠️ HexDB lookup failed for ${hex}: ${error.message}`);
-    return null;
+      const data = await this.requestJson(url, {
+        signal: AbortSignal.timeout(5000),
+      });
+
+      if (!data) {
+        setCached(hexdbCache, hex, null, NEGATIVE_CACHE_TTL);
+        return null;
+      }
+
+      const result = {
+        registration: data.registration || null,
+        manufacturer: data.manufacturer || null,
+        model: data.type || null,
+        typecode: data.icao_type_code || null,
+        owner: data.registered_owner || null,
+      };
+
+      const hasData = result.model || result.typecode || result.manufacturer;
+
+      setCached(
+        hexdbCache,
+        hex,
+        hasData ? result : null,
+        hasData ? FALLBACK_CACHE_TTL : NEGATIVE_CACHE_TTL
+      );
+
+      if (hasData) {
+        console.log(
+          `   🔎 HexDB identified ${hex}: ${result.model || result.typecode}`
+        );
+
+        return result;
+      }
+
+      return null;
+    } catch (error) {
+      console.warn(`⚠️ HexDB lookup failed for ${hex}: ${error.message}`);
+      return null;
+    }
   }
-}
+
+  // ---------------------------------------------------------------------------
+  // AirLabs fallback
+  // ---------------------------------------------------------------------------
+
   async getAircraftFromAirLabs(icao24) {
-  if (!icao24 || !config.airlabs.apiKey) return null;
+    const hex = normalizeHex(icao24);
 
-  try {
-    const url = new URL('https://airlabs.co/api/v9/fleets');
-
-    url.searchParams.set('hex', icao24.toLowerCase());
-    url.searchParams.set('api_key', config.airlabs.apiKey);
-
-    const response = await fetch(url, {
-      signal: AbortSignal.timeout(5000)
-    });
-
-    if (!response.ok) {
-      console.log(`   ⚠️ AirLabs returned HTTP ${response.status}`);
+    if (!hex || !config.airlabs?.apiKey) {
       return null;
     }
 
-    const data = await response.json();
-    const aircraft = data.response?.[0] || data[0] || null;
+    const cached = getCached(airlabsCache, hex);
 
-    if (!aircraft) return null;
+    if (cached !== undefined) {
+      return cached;
+    }
 
-    return {
-      registration: aircraft.reg_number || null,
-      manufacturer: aircraft.manufacturer || null,
-      model: aircraft.model || null,
-      typecode: aircraft.icao || aircraft.aircraft_icao || null,
-      owner: null
+    try {
+      const url = new URL('https://airlabs.co/api/v9/fleets');
+
+      url.searchParams.set('hex', hex);
+      url.searchParams.set('api_key', config.airlabs.apiKey);
+
+      const data = await this.requestJson(url.toString(), {
+        signal: AbortSignal.timeout(5000),
+      });
+
+      if (!data) {
+        setCached(airlabsCache, hex, null, NEGATIVE_CACHE_TTL);
+        return null;
+      }
+
+      const aircraft = data.response?.[0] || data[0] || null;
+
+      if (!aircraft) {
+        setCached(airlabsCache, hex, null, NEGATIVE_CACHE_TTL);
+        return null;
+      }
+
+      const result = {
+        registration: aircraft.reg_number || null,
+        manufacturer: aircraft.manufacturer || null,
+        model: aircraft.model || null,
+        typecode: aircraft.icao || aircraft.aircraft_icao || null,
+        owner: null,
+      };
+
+      const hasData = result.model || result.typecode || result.manufacturer;
+
+      setCached(
+        airlabsCache,
+        hex,
+        hasData ? result : null,
+        hasData ? FALLBACK_CACHE_TTL : NEGATIVE_CACHE_TTL
+      );
+
+      return hasData ? result : null;
+    } catch (error) {
+      console.warn(`⚠️ AirLabs lookup failed for ${hex}: ${error.message}`);
+      return null;
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Unified aircraft identification
+  // ---------------------------------------------------------------------------
+
+  async resolveAircraftType(aircraft) {
+    const emptyResult = {
+      typecode: null,
+      model: null,
+      manufacturer: null,
+      registration: null,
     };
 
-  } catch (error) {
-    console.log(`   ⚠️ AirLabs lookup failed: ${error.message}`);
-    return null;
-  }
-}
-
-async resolveAircraftType(aircraft) {
-  const emptyResult = {
-    typecode: null,
-    model: null,
-    manufacturer: null,
-    registration: null
-  };
-
-  if (!aircraft?.icao24) {
-    return emptyResult;
-  }
-
-  const hex = aircraft.icao24.toLowerCase();
-
-  let metadata = null;
-
-  // 1. OpenSky
-  try {
-    if (config.tracking.fetchMetadata) {
-      metadata = await this.getAircraftMetadata(hex);
+    if (!aircraft?.icao24) {
+      return emptyResult;
     }
-  } catch (error) {
-    console.warn(`OpenSky metadata failed for ${hex}: ${error.message}`);
-  }
 
-  let result = {
-    typecode: metadata?.typecode || null,
-    model: metadata?.model || null,
-    manufacturer: metadata?.manufacturerName || null,
-    registration: metadata?.registration || null
-  };
+    const hex = normalizeHex(aircraft.icao24);
 
-  // 2. HexDB
-  if (!result.typecode && !result.model) {
+    let result = { ...emptyResult };
+
+    // 1. OpenSky - primary source.
     try {
-      const hexdb = await this.getAircraftFromHexDB(hex);
+      if (config.tracking?.fetchMetadata) {
+        const metadata = await this.getAircraftMetadata(hex);
 
-      if (hexdb) {
-        result.typecode = hexdb.typecode || result.typecode;
-        result.model = hexdb.model || result.model;
-        result.manufacturer = hexdb.manufacturer || result.manufacturer;
-        result.registration = hexdb.registration || result.registration;
+        if (metadata) {
+          result.typecode = metadata.typecode || null;
+          result.model = metadata.model || null;
+          result.manufacturer = metadata.manufacturerName || null;
+          result.registration = metadata.registration || null;
+        }
       }
     } catch (error) {
-      console.warn(`HexDB failed for ${hex}: ${error.message}`);
+      console.warn(`⚠️ OpenSky metadata failed for ${hex}: ${error.message}`);
     }
-  }
 
-  // 3. AirLabs
-  if (!result.typecode && !result.model) {
-    try {
-      const airlabs = await this.getAircraftFromAirLabs(hex);
+    // 2. HexDB - fill any missing fields.
+    if (
+      !result.typecode ||
+      !result.model ||
+      !result.manufacturer ||
+      !result.registration
+    ) {
+      try {
+        const hexdb = await this.getAircraftFromHexDB(hex);
 
-      if (airlabs) {
-        result.typecode = airlabs.typecode || result.typecode;
-        result.model = airlabs.model || result.model;
-        result.manufacturer = airlabs.manufacturer || result.manufacturer;
-        result.registration = airlabs.registration || result.registration;
+        if (hexdb) {
+          result.typecode ||= hexdb.typecode || null;
+          result.model ||= hexdb.model || null;
+          result.manufacturer ||= hexdb.manufacturer || null;
+          result.registration ||= hexdb.registration || null;
+        }
+      } catch (error) {
+        console.warn(`⚠️ HexDB failed for ${hex}: ${error.message}`);
       }
-    } catch (error) {
-      console.warn(`AirLabs failed for ${hex}: ${error.message}`);
     }
+
+    // 3. AirLabs - fill remaining gaps.
+    if (
+      !result.typecode ||
+      !result.model ||
+      !result.manufacturer ||
+      !result.registration
+    ) {
+      try {
+        const airlabs = await this.getAircraftFromAirLabs(hex);
+
+        if (airlabs) {
+          result.typecode ||= airlabs.typecode || null;
+          result.model ||= airlabs.model || null;
+          result.manufacturer ||= airlabs.manufacturer || null;
+          result.registration ||= airlabs.registration || null;
+        }
+      } catch (error) {
+        console.warn(`⚠️ AirLabs failed for ${hex}: ${error.message}`);
+      }
+    }
+
+    // Always return the same predictable object shape.
+    return {
+      typecode: result.typecode || null,
+      model: result.model || null,
+      manufacturer: result.manufacturer || null,
+      registration: result.registration || null,
+    };
   }
 
-  // Always return a valid object
-  return {
-    typecode: result.typecode || null,
-    model: result.model || null,
-    manufacturer: result.manufacturer || null,
-    registration: result.registration || null
-  };
-}
-  
+  // ---------------------------------------------------------------------------
+  // Unit conversions
+  // ---------------------------------------------------------------------------
+
+  static metersToFeet(meters) {
+    return Number.isFinite(meters) ? Math.round(meters * 3.28084) : null;
+  }
+
+  static msToKnots(ms) {
+    return Number.isFinite(ms) ? Math.round(ms * 1.94384) : null;
+  }
 }
 
 module.exports = OpenSkyClient;
