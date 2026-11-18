@@ -138,13 +138,14 @@ const altitude =
 const distance = plane.distanceMiles;
 
 // Resolve aircraft model using multiple databases
-const aircraftInfo = await this.opensky.resolveAircraftType(plane);
+const aircraftInfo =
+  (await this.opensky.resolveAircraftType(plane)) || {};
 
-const typecode = aircraftInfo.typecode || null;
+const typecode = aircraftInfo?.typecode || null;
 
 const aircraftModel =
-  aircraftInfo.model ||
-  (aircraftInfo.manufacturer && typecode
+  aircraftInfo?.model ||
+  (aircraftInfo?.manufacturer && typecode
     ? `${aircraftInfo.manufacturer} ${typecode}`
     : typecode) ||
   null;
