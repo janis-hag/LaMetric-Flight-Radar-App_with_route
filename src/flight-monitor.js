@@ -9,6 +9,45 @@ const OpenSkyClient = require('./opensky-client');
 const LaMetricClient = require('./lametric-client');
 const { filterByDistance } = require('./distance');
 
+const routeCache = new Map();
+
+async function getFlightRoute(callsign) {
+  if (!callsign) return null;
+
+  if (routeCache.has(callsign)) {
+    return routeCache.get(callsign);
+  }
+
+  try {
+    const response = await fetch(
+      `https://api.adsbdb.com/v0/callsign/${encodeURIComponent(callsign)}`,
+      { signal: AbortSignal.timeout(5000) }
+    );
+
+    if (!response.ok) {
+      routeCache.set(callsign, null);
+      return null;
+    }
+
+    const data = await response.json();
+    const route = data?.response?.flightroute;
+
+    const origin = route?.origin?.iata_code || route?.origin?.icao_code;
+    const destination =
+      route?.destination?.iata_code || route?.destination?.icao_code;
+
+    const result = origin && destination
+      ? { origin, destination }
+      : null;
+
+    routeCache.set(callsign, result);
+    return result;
+  } catch (error) {
+    console.log(`Route lookup failed for ${callsign}: ${error.message}`);
+    return null;
+  }
+}
+
 class FlightMonitor {
   constructor() {
     this.opensky = new OpenSkyClient();
@@ -81,30 +120,52 @@ class FlightMonitor {
           continue;
         }
 
-        // Optionally fetch aircraft metadata (uses extra API credits!)
+        // Optionally fetch aircraft metadata
         let enriched = plane;
+
         if (config.tracking.fetchMetadata) {
           enriched = await this.opensky.enrichWithMetadata(plane);
         }
 
         const callsign = enriched.callsign || enriched.icao24;
-        const altitude = OpenSkyClient.metersToFeet(enriched.baroAltitude || enriched.geoAltitude);
+
+        const altitude = OpenSkyClient.metersToFeet(
+          enriched.baroAltitude || enriched.geoAltitude
+        );
+
         const typecode = enriched.typecode || null;
+
+        // Full aircraft model (if available)
+        const aircraftModel =
+          enriched.model ||
+          (enriched.manufacturerName && typecode
+            ? `${enriched.manufacturerName} ${typecode}`
+            : typecode);
+
         const distance = plane.distanceMiles;
 
+        // Fetch origin and destination using callsign
+        const route = await getFlightRoute(callsign);
+
+        const origin = route?.origin || null;
+        const destination = route?.destination || null;
+
         // Log what we found
-        const typeInfo = typecode ? ` (${typecode})` : '';
-        console.log(`   - ${callsign}${typeInfo}: ${altitude ? altitude.toLocaleString() + ' ft' : 'ground'}, ${distance.toFixed(1)} mi`);
+        console.log(
+          `   - ${callsign}: ${origin || '?'} → ${destination || '?'} | ` +
+          `${aircraftModel || 'Unknown aircraft'} | ` +
+          `${altitude ? altitude.toLocaleString() + ' ft' : 'Unknown altitude'}`
+        );
 
         // Send notification to LaMetric
         this.lametric.pushFlightNotification({
           callsign,
           altitude,
           typecode,
+          aircraftModel,
+          origin,
+          destination,
           distance,
-          // Route info would go here if we had it
-          // origin: null,
-          // destination: null,
         });
 
         this.markNotified(plane.icao24);
