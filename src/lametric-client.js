@@ -93,7 +93,6 @@ class LaMetricClient {
    * @param {string} [flight.typecode] - Aircraft type (e.g., "A320", "B738")
    * @param {string} [flight.origin] - Origin airport code
    * @param {string} [flight.destination] - Destination airport code
-   * @param {number} [flight.distance] - Distance in miles
    */
 
 
