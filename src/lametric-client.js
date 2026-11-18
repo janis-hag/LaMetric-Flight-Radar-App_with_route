@@ -96,61 +96,59 @@ class LaMetricClient {
    * @param {number} [flight.distance] - Distance in miles
    */
 
-   pushFlightNotification(flight) {
-    const callsign = flight.callsign || 'Aircraft';
-    const altitudeFt = flight.altitude || 0;
 
-    const altText = altitudeFt > 0
-      ? `${altitudeFt.toLocaleString()} ft`
-      : 'Ground';
+  pushFlightNotification(flight) {
+   const callsign = flight.callsign || 'Aircraft';
+   const altitude = flight.altitude ?? 0;
+   const altitudeText = altitude > 0
+     ? `${Math.round(altitude).toLocaleString()} m`
+     : 'Ground';
 
-    const aircraftModel = flight.aircraftModel || flight.typecode || 'Unknown aircraft';
+   const aircraftModel =
+     flight.aircraftModel || flight.typecode || 'Unknown aircraft';
 
-    // Build route text
-    const routeText =
-      flight.origin && flight.destination
-        ? `${flight.origin} → ${flight.destination}`
-        : 'Route unknown';
+   const parts = [
+     callsign
+   ];
 
-    // Notification text
-    const parts = [
-      callsign,
-      routeText,
-      aircraftModel,
-      altText,
-    ];
+   // Only display the route if both airports are available
+   if (flight.origin && flight.destination) {
+     parts.push(`${flight.origin} → ${flight.destination}`);
+   }
 
-    if (flight.distance) {
-      parts.push(`${flight.distance.toFixed(1)} mi`);
-    }
+   parts.push(aircraftModel);
+   parts.push(altitudeText);
 
-    const scrollingText = parts.join(' | ');
+   if (flight.distance) {
+     parts.push(`${flight.distance.toFixed(1)} mi`);
+   }
 
-    const payload = {
-      priority: 'info',
-      icon_type: 'none',
-      lifetime: 10000,
-      model: {
-        cycles: 3,
-        frames: [
-          {
-            icon: '8879',
-            text: scrollingText,
-          },
-        ],
-      },
-    };
+   const scrollingText = parts.join(' | ');
 
-    // Optional sound
-    if (config.tracking.soundEnabled) {
-      payload.model.sound = {
-        category: 'notifications',
-        id: 'notification',
-      };
-    }
+   const payload = {
+     priority: 'info',
+     icon_type: 'none',
+     lifetime: 10000,
+     model: {
+       cycles: 3,
+       frames: [{
+         icon: '8879',
+          text: scrollingText
+      }]
+     }
+   };
 
-    return this.pushRawNotification(payload);
-  }
+   // Sound is optional
+   if (config.tracking.soundEnabled) {
+     payload.model.sound = {
+       category: 'notifications',
+       id: 'notification'
+     };
+   }
+
+   return this.pushRawNotification(payload);
+ }
+  
 
   /**
    * Dismiss all notifications and return to clock
