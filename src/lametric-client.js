@@ -121,7 +121,7 @@ class LaMetricClient {
    }
 
 
-   const scrollingText = parts.join(' | ');
+   const scrollingText = parts.join(' |');
     
 
    const payload = {
