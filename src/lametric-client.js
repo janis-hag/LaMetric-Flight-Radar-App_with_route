@@ -95,55 +95,59 @@ class LaMetricClient {
    * @param {string} [flight.destination] - Destination airport code
    * @param {number} [flight.distance] - Distance in miles
    */
-  pushFlightNotification(flight) {
+
+   pushFlightNotification(flight) {
     const callsign = flight.callsign || 'Aircraft';
     const altitudeFt = flight.altitude || 0;
 
-    // Format altitude
-    let altText;
-    if (altitudeFt >= 10000) {
-      altText = `${(altitudeFt / 1000).toFixed(0)}k`;
-    } else if (altitudeFt > 0) {
-      altText = `${altitudeFt.toLocaleString()}`;
-    } else {
-      altText = 'Ground';
-    }
+    const altText = altitudeFt > 0
+      ? `${altitudeFt.toLocaleString()} ft`
+      : 'Ground';
 
-    // Build one scrolling text string with bullet separators
-    const parts = [callsign];
+    const aircraftModel = flight.aircraftModel || flight.typecode || 'Unknown aircraft';
 
-    if (flight.typecode) {
-      parts.push(flight.typecode);
-    }
+    // Build route text
+    const routeText =
+      flight.origin && flight.destination
+        ? `${flight.origin} → ${flight.destination}`
+        : 'Route unknown';
 
-    if (flight.origin && flight.destination) {
-      parts.push(`${flight.origin}>${flight.destination}`);
-    }
-
-    parts.push(altText);
+    // Notification text
+    const parts = [
+      callsign,
+      routeText,
+      aircraftModel,
+      altText,
+    ];
 
     if (flight.distance) {
-      parts.push(`${flight.distance.toFixed(1)}mi`);
+      parts.push(`${flight.distance.toFixed(1)} mi`);
     }
 
-    // Join with spaces
-    const scrollingText = parts.join('  ');
+    const scrollingText = parts.join(' | ');
 
     const payload = {
       priority: 'info',
       icon_type: 'none',
-      lifetime: 10000,  // Dismiss after 10 seconds and return to clock
+      lifetime: 10000,
       model: {
-        cycles: 3,  // Show twice
+        cycles: 3,
         frames: [
           {
-            icon: '8879',  // airplane icon
+            icon: '8879',
             text: scrollingText,
-          }
+          },
         ],
-        sound: { category: 'notifications', id: 'notification' },
       },
     };
+
+    // Optional sound
+    if (config.tracking.soundEnabled) {
+      payload.model.sound = {
+        category: 'notifications',
+        id: 'notification',
+      };
+    }
 
     return this.pushRawNotification(payload);
   }
