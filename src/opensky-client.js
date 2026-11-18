@@ -402,7 +402,6 @@ class OpenSkyClient {
     }
   }
 
-  /* Not used yet as we have no API key  
   // 3. AirLabs fallback
   if (!typecode && !model && config.airlabs.apiKey) {
     const airlabs = await this.getAircraftFromAirLabs(aircraft.icao24);
@@ -421,8 +420,7 @@ class OpenSkyClient {
     manufacturer,
     registration: metadata?.registration || null
   };
-  */
-}
+  }
 }
 
 module.exports = OpenSkyClient;
