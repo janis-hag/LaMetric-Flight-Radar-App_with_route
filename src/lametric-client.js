@@ -119,16 +119,18 @@ class LaMetricClient {
    parts.push(aircraftModel);
    parts.push(altitudeText);
 
-   if (flight.distance) {
-     parts.push(`${flight.distance.toFixed(1)} mi`);
-   }
-
+   /** 
+   *if (flight.distance) {
+   *  parts.push(`${flight.distance.toFixed(1)} mi`);
+   *}
+   */
+    
    const scrollingText = parts.join(' | ');
 
    const payload = {
      priority: 'info',
      icon_type: 'none',
-     lifetime: 10000,
+     lifetime: 10000, // Dismiss after 10 seconds and return to clock
      model: {
        cycles: 3,
        frames: [{
